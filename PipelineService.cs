@@ -28,16 +28,16 @@ public class PipelineService
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            var query = row[0]?.ToString(); // Column A = search query
+            var query = row[0]?.ToString(); // Column A = Topic
             if (string.IsNullOrWhiteSpace(query)) continue;
 
             // Step 2: Tavily web search
             var searchResults = await TavilySearchAsync(query);
 
-            // Step 3: Use search results directly
-            var aiAnswer = searchResults.Length > 500 ? searchResults.Substring(0, 500) + "..." : searchResults;
+            // Step 3: Send to Gemini AI Agent
+            var aiAnswer = await AskGeminiAsync(query, searchResults);
 
-            // Step 4: Write result back to sheet (Column B)
+            // Step 4: Write LinkedIn post to Column C
             var rowNumber = i + 2; // 1-indexed + header row
             await UpdateRowAsync(sheetsService, spreadsheetId, sheetName, rowNumber, aiAnswer);
         }
@@ -61,7 +61,7 @@ public class PipelineService
     private async Task<IList<IList<object>>> GetRowsAsync(
         SheetsService service, string spreadsheetId, string sheetName)
     {
-        var range = $"{sheetName}!A2:A"; // Read column A (skip header)
+        var range = $"{sheetName}!A2:A"; // Read Topic column (skip header)
         var request = service.Spreadsheets.Values.Get(spreadsheetId, range);
         var response = await request.ExecuteAsync();
         return response.Values ?? new List<IList<object>>();
@@ -73,12 +73,11 @@ public class PipelineService
         var payload = new { api_key = apiKey, query, max_results = 3 };
 
         var response = await _http.PostAsJsonAsync("https://api.tavily.com/search", payload);
-        var errorBody = await response.Content.ReadAsStringAsync(); if (!response.IsSuccessStatusCode) throw new Exception($"Gemini error {response.StatusCode}: {errorBody}");
+        response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
 
-        // Extract top result snippets
         var results = doc.RootElement.GetProperty("results");
         var snippets = new List<string>();
         foreach (var r in results.EnumerateArray())
@@ -92,9 +91,10 @@ public class PipelineService
     private async Task<string> AskGeminiAsync(string query, string context)
     {
         var apiKey = _config["GeminiApiKey"];
-        var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}";
+        var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={apiKey}";
 
-        var prompt = $"Based on the following search results, answer this question:\n\nQuestion: {query}\n\nSources:\n{context}";
+        // ✅ Updated prompt for LinkedIn posts
+        var prompt = $"Write a professional LinkedIn post about: {query}\n\nUse these recent search results for context:\n{context}\n\nKeep it engaging, under 200 words, with relevant hashtags.";
 
         var payload = new
         {
@@ -104,10 +104,8 @@ public class PipelineService
             }
         };
 
-        var jsonPayload = System.Text.Json.JsonSerializer.Serialize(payload);
-        var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
-        var response = await _http.PostAsync(url, content);
-        var errorBody = await response.Content.ReadAsStringAsync(); if (!response.IsSuccessStatusCode) throw new Exception($"Gemini error {response.StatusCode}: {errorBody}");
+        var response = await _http.PostAsJsonAsync(url, payload);
+        response.EnsureSuccessStatusCode();
 
         var json = await response.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
@@ -123,7 +121,8 @@ public class PipelineService
     private async Task UpdateRowAsync(
         SheetsService service, string spreadsheetId, string sheetName, int rowNum, string value)
     {
-        var range = $"{sheetName}!B{rowNum}"; // Write to column B
+        // ✅ Updated to write to Column C (Content)
+        var range = $"{sheetName}!C{rowNum}";
         var body = new ValueRange
         {
             Values = new List<IList<object>> { new List<object> { value } }
@@ -136,5 +135,3 @@ public class PipelineService
         await request.ExecuteAsync();
     }
 }
-
-
